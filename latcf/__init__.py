@@ -19,8 +19,9 @@ from .solver import (
 )
 from .cursor import Lateral, Point, Box
 from .agent import plate, plate_context
+from .stealth import get_stealth_js, get_launch_args, apply_stealth
 
-__version__ = "1.0.1"
+__version__ = "1.0.4"
 __all__ = [
     "Challenger",
     "latch",
