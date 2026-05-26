@@ -44,17 +44,19 @@ def _chrome_paths(channel: str = "") -> List[str]:
     if platform.system() != "Windows":
         if "edge" in channel:
             return ["microsoft-edge", "microsoft-edge-stable"]
-        return ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+        return ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "microsoft-edge-stable"]
     dirs = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LocalAppData")]
     dirs = [d for d in dirs if d]
     subs = {
         "edge": os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
+        "msedge": os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
         "canary": os.path.join("Google", "Chrome SxS", "Application", "chrome.exe"),
         "beta": os.path.join("Google", "Chrome Beta", "Application", "chrome.exe"),
         "dev": os.path.join("Google", "Chrome Dev", "Application", "chrome.exe"),
+        "chrome": os.path.join("Google", "Chrome", "Application", "chrome.exe"),
     }
     variant = next((k for k in subs if k in channel), None)
-    sub = subs[variant] if variant else os.path.join("Google", "Chrome", "Application", "chrome.exe")
+    sub = subs[variant] if variant else subs["msedge"]
     if variant == "canary":
         return [os.path.join(os.environ.get("LocalAppData", ""), sub)]
     return [os.path.join(d, sub) for d in dirs]
