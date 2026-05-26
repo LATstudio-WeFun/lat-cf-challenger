@@ -65,6 +65,7 @@ class Latitude:
     wait_after_click_ms: int = 100
     click_cooldown_ms: int = 5000
     max_click_cooldown_ms: int = 45000
+    managed_timeout_ms: int = 45000
     logger: Optional[Callable[[str], None]] = None
 
 
@@ -145,8 +146,16 @@ def _click_pt(box: Box) -> Point:
 async def _is_managed(page: Page) -> bool:
     try:
         return await page.evaluate("""() => {
-            const t = (document.title || '') + '\\n' + (document.body?.innerText?.slice(0, 5000) || '') + '\\n' + location.href;
-            return /just a moment|security verification|checking your browser/i.test(t) && /cloudflare|verify you are not a bot|malicious bots|ray id/i.test(t);
+            const t = (document.title || '') + '\\n' + (document.body?.innerText?.slice(0, 5000) || '') + '\\n' + document.body?.innerHTML?.slice(0, 3000) + '\\n' + location.href;
+            const hasChallenge = /just a moment|security verification|checking your browser|正在安全验证|安全检查|请验证你是否为真人|请稍候|verify you are human|checking.*browser|attention required/i.test(t);
+            const hasCf = /cloudflare|verify you are not a bot|malicious bots|ray id|__cf_chl_rt_tk|cf-challenge|challenge-platform/i.test(t);
+            if (hasChallenge && hasCf) return true;
+            if (hasChallenge && document.querySelector('script[src*="challenges.cloudflare.com"]')) return true;
+            if (hasChallenge && document.querySelector('#challenge-running, #challenge-stage, .challenge-running')) return true;
+            if (/__cf_chl_rt_tk/.test(location.href) && hasChallenge) return true;
+            if (hasChallenge && document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="cdn-cgi/challenge-platform"]')) return true;
+            if (document.querySelector('iframe[src*="challenges.cloudflare.com"]') && /请稍候|just a moment|安全/i.test(document.title || '')) return true;
+            return false;
         }""")
     except Exception:
         return False
@@ -157,11 +166,12 @@ async def _frame_ready(loc: Locator) -> bool:
         tag = await loc.evaluate("el => el.tagName?.toLowerCase() || ''")
         if tag == "iframe":
             frame = await loc.content_frame
-            if frame:
-                try:
-                    await frame.wait_for_selector('input[type="checkbox"]', state="visible", timeout=8000)
-                except Exception:
-                    return False
+            if not frame:
+                return False
+            try:
+                await frame.wait_for_selector('input[type="checkbox"]', state="visible", timeout=3000)
+            except Exception:
+                pass
     except Exception:
         pass
     return True
@@ -253,6 +263,26 @@ async def _click_elem_tree(page: Page, elem: ElementHandle, cursor: Lateral, opt
 
 
 async def _click_turnstile(page: Page, cursor: Lateral, opts: Latitude) -> bool:
+    for sel in ['iframe[src*="challenges.cloudflare.com"]', 'iframe[src*="cdn-cgi/challenge-platform"]']:
+        loc = page.locator(sel)
+        try:
+            count = await loc.count()
+        except Exception:
+            continue
+        for i in range(min(count, opts.max_candidates)):
+            try:
+                bd = await loc.nth(i).bounding_box(timeout=2000)
+                if bd and bd["width"] > 0 and bd["height"] > 0:
+                    box = Box(**bd)
+                    if _is_turnstile_box(box):
+                        pt = _click_pt(box)
+                        await _prep_click(page, opts.foreground)
+                        await page.mouse.click(pt.x, pt.y)
+                        if opts.wait_after_click_ms > 0:
+                            await page.wait_for_timeout(round(opts.wait_after_click_ms * (0.7 + random.random() * 0.6)))
+                        return True
+            except Exception:
+                pass
     shuffled = list(opts.selectors)
     random.shuffle(shuffled)
     for sel in shuffled:
@@ -479,16 +509,57 @@ async def collate(page: Page, context: Optional[BrowserContext] = None, urls: Op
     )
 
 
+async def _click_managed(page: Page, cursor: Lateral, opts: Latitude) -> bool:
+    try:
+        for sel in ['iframe[src*="challenges.cloudflare.com"]', 'iframe[src*="cdn-cgi/challenge-platform"]']:
+            loc = page.locator(sel)
+            if await loc.count() > 0:
+                try:
+                    bd = await loc.first.bounding_box(timeout=3000)
+                    if bd and bd["width"] > 0 and bd["height"] > 0:
+                        x = bd["x"] + 28 + (random.random() - 0.5) * 8
+                        y = bd["y"] + bd["height"] / 2 + (random.random() - 0.5) * 6
+                        await _prep_click(page, opts.foreground)
+                        await page.mouse.click(x, y)
+                        if opts.wait_after_click_ms > 0:
+                            await page.wait_for_timeout(round(opts.wait_after_click_ms * (0.7 + random.random() * 0.6)))
+                        return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        checkbox = page.locator('input[type="checkbox"]')
+        if await checkbox.count() > 0:
+            if await _click_loc(page, checkbox.first, cursor, opts):
+                return True
+    except Exception:
+        pass
+    try:
+        btn = page.locator('button:has-text("Verify"), button:has-text("验证"), input[type="submit"]')
+        if await btn.count() > 0:
+            if await _click_loc(page, btn.first, cursor, opts):
+                return True
+    except Exception:
+        pass
+    if await _click_turnstile(page, cursor, opts):
+        return True
+    if await _click_fallback(page, cursor, opts):
+        return True
+    return False
+
+
 async def slate_once(page: Page, cursor: Lateral, opts: Latitude) -> dict:
     if await elate(page):
-        return {"clicked": False, "status": "solved"}
-    if await _is_managed(page):
-        return {"clicked": False, "status": "managed-challenge"}
+        return {"engaged": False, "status": "solved"}
+    managed = await _is_managed(page)
+    if managed:
+        return {"engaged": False, "status": "managed-challenge"}
     if await _click_turnstile(page, cursor, opts):
-        return {"clicked": True, "status": "clicked"}
+        return {"engaged": True, "status": "engaged"}
     if await _click_fallback(page, cursor, opts):
-        return {"clicked": True, "status": "clicked"}
-    return {"clicked": False, "status": "not-found"}
+        return {"engaged": True, "status": "engaged"}
+    return {"engaged": False, "status": "not-found"}
 
 
 class Slate:
@@ -503,6 +574,8 @@ class Slate:
         self._next_click_at = 0.0
         self._task: Optional[asyncio.Task] = None
         self._last_managed_log = 0.0
+        self._managed_since: Optional[float] = None
+        self._managed_waiting = False
 
     async def _run(self):
         if self._closed:
@@ -516,23 +589,27 @@ class Slate:
             now = time.time() * 1000
             if now < self._next_click_at:
                 return
+            if self._managed_waiting:
+                return
             result = await slate_once(self._page, self._cursor, self._opts)
             if result["status"] == "managed-challenge":
-                self._attempts = 0
-                self._next_click_at = time.time() * 1000 + max(self._opts.interval_ms, 5000)
-                if time.time() - self._last_managed_log > 30:
-                    self._last_managed_log = time.time()
-                    self._opts.logger and self._opts.logger("cloudflare managed challenge detected; solver paused")
+                if self._managed_since is None:
+                    self._managed_since = time.time() * 1000
+                    self._managed_waiting = True
+                    self._opts.logger and self._opts.logger("cloudflare managed challenge detected; waiting for auto-resolve")
+                self._next_click_at = time.time() * 1000 + 5000
                 return
             if result["status"] in ("solved", "not-found"):
                 self._attempts = 0
                 self._next_click_at = 0
+                self._managed_since = None
+                self._managed_waiting = False
                 return
-            if result["clicked"]:
+            if result["engaged"]:
                 self._attempts += 1
                 cd = min(self._opts.max_click_cooldown_ms, self._opts.click_cooldown_ms * min(self._attempts, 6))
                 self._next_click_at = time.time() * 1000 + cd
-                self._opts.logger and self._opts.logger(f"turnstile clicked; retry in {cd}ms")
+                self._opts.logger and self._opts.logger(f"turnstile engaged; cooldown {cd}ms")
         except Exception as e:
             self._opts.logger and self._opts.logger(str(e))
         finally:
@@ -551,11 +628,49 @@ class Slate:
     async def start(self):
         self.tick()
         self._page.on("close", self.stop)
-        self._page.on("domcontentloaded", lambda: self.tick())
-        self._page.on("load", lambda: self.tick())
         self._page.on("framenavigated", lambda: self.tick())
         while not self._closed:
             await asyncio.sleep(self._opts.interval_ms / 1000)
+            if self._managed_waiting:
+                elapsed = (time.time() * 1000 - self._managed_since) if self._managed_since else 0
+                if elapsed > self._opts.managed_timeout_ms:
+                    self._managed_waiting = False
+                    self._managed_since = None
+                    self._opts.logger and self._opts.logger("managed challenge timeout; attempting interaction")
+                    if await _click_managed(self._page, self._cursor, self._opts):
+                        self._next_click_at = time.time() * 1000 + self._opts.click_cooldown_ms
+                    else:
+                        try:
+                            await self._page.reload(timeout=15000)
+                        except Exception:
+                            pass
+                        self._next_click_at = time.time() * 1000 + 3000
+                else:
+                    cookies = []
+                    try:
+                        cookies = await self._page.context.cookies()
+                    except Exception:
+                        pass
+                    if any(c["name"] == "cf_clearance" for c in cookies):
+                        self._managed_waiting = False
+                        self._managed_since = None
+                        self._opts.logger and self._opts.logger("managed challenge auto-resolved")
+                    else:
+                        for sel in ['iframe[src*="challenges.cloudflare.com"]', 'iframe[src*="cdn-cgi/challenge-platform"]']:
+                            try:
+                                loc = self._page.locator(sel)
+                                if await loc.count() > 0:
+                                    bd = await loc.first.bounding_box(timeout=2000)
+                                    if bd and bd["width"] > 0 and bd["height"] > 0:
+                                        box = Box(**bd)
+                                        if _is_turnstile_box(box):
+                                            pt = _click_pt(box)
+                                            await self._page.mouse.click(pt.x, pt.y)
+                                            self._opts.logger and self._opts.logger("turnstile widget engaged during managed wait")
+                                            await self._page.wait_for_timeout(round(self._opts.wait_after_click_ms * (0.7 + random.random() * 0.6)))
+                                            break
+                            except Exception:
+                                pass
             self.tick()
 
     def stop(self):
