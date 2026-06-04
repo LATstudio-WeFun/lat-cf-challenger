@@ -20,7 +20,7 @@ async def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         start = time.time()
         cf = await latch(
-            headless=False, # or False
+            headless=True, # or False
             channel="msedge",
             turnstile=opts,
             stealth=True,
